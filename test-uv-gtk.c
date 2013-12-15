@@ -5,31 +5,20 @@
 #include <string.h>
 #include <assert.h>
 
-GtkWidget *label = NULL;
+#define UV_SOURCE(s) ((UvSource *) (s))
 
-int count = 0;
+typedef struct _UvSource UvSource;
 
-typedef struct _MySource MySource;
-
-struct _MySource
+struct _UvSource
 {
     GSource base;
 
     gpointer tag;
+
+    uv_loop_t *loop;
 };
 
-void on_timeout(uv_timer_t *timer, int status)
-{
-    fprintf(stderr, ".");
-    fflush(stderr);
-
-    ++ count;
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%d", count);
-    gtk_label_set_text(GTK_LABEL(label), buf);
-}
-
-gboolean prepare(GSource *source, gint *timeout)
+static gboolean uv_source_prepare(GSource *source, gint *timeout)
 {
     uv_update_time(uv_default_loop());
     *timeout = uv_backend_timeout(uv_default_loop());
@@ -37,30 +26,59 @@ gboolean prepare(GSource *source, gint *timeout)
     return 0 == *timeout;
 }
 
-gboolean check(GSource *source)
+static gboolean uv_source_check(GSource *source)
 {
     if(! uv_backend_timeout(uv_default_loop())) {
         return TRUE;
     }
 
-    return G_IO_IN == g_source_query_unix_fd(source, ((MySource *) source)->tag);
+    return G_IO_IN == g_source_query_unix_fd(source,
+                                             UV_SOURCE(source)->tag);
 }
 
-gboolean fd_check(GSource *source)
-{
-    fprintf(stderr, "2");
-    fflush(stderr);
-
-    GIOCondition cond = g_source_query_unix_fd(source,
-                                               ((MySource *) source)->tag);
-    return G_IO_IN == cond;
-}
-
-gboolean dispatch(GSource *source, GSourceFunc callback, gpointer user_data)
+static gboolean uv_source_dispatch(GSource *source,
+                                   GSourceFunc callback,
+                                   gpointer user_data)
 {
     uv_run(uv_default_loop(), UV_RUN_NOWAIT);
 
     return TRUE;
+}
+
+static void uv_source_finalize(GSource *source)
+{
+    g_source_remove_unix_fd(source, UV_SOURCE(source)->tag);
+}
+
+GSource * uv_source_new(uv_loop_t *loop)
+{
+    g_return_val_if_fail(NULL != loop, NULL);
+
+    static GSourceFuncs funcs = {
+        .prepare = uv_source_prepare,
+        .check = uv_source_check,
+        .dispatch = uv_source_dispatch,
+        .finalize = uv_source_finalize
+    };
+
+    GSource *self = g_source_new(&funcs, sizeof(UvSource));
+    UV_SOURCE(self)->loop = loop;
+    UV_SOURCE(self)->tag = g_source_add_unix_fd(self,
+                                                uv_backend_fd(loop),
+                                                G_IO_IN);
+    return self;
+}
+
+GtkWidget *label = NULL;
+
+int count = 0;
+
+void on_timeout(uv_timer_t *timer, int status)
+{
+    ++ count;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%d", count);
+    gtk_label_set_text(GTK_LABEL(label), buf);
 }
 
 void on_close(uv_handle_t *handle)
@@ -85,27 +103,20 @@ void on_connect(uv_stream_t *server, int status)
     uv_close((uv_handle_t *) conn, on_close);
 }
 
-int main()
+int main(int argc, char *args[])
 {
+    gtk_init(&argc, &args);
+
     uv_loop_t *loop = uv_default_loop();
-
-    GSourceFuncs source_funcs = {
-        .prepare = prepare,
-        .check = check,
-        .dispatch = dispatch,
-    };
-    GSource *source = g_source_new(&source_funcs, sizeof(MySource));
-    ((MySource *) source)->tag = g_source_add_unix_fd(source,
-                                                      uv_backend_fd(loop),
-                                                      G_IO_IN);
+    GSource *source = uv_source_new(loop);
     g_source_attach(source, NULL);
-
-    gtk_init(NULL, NULL);
+    g_source_unref(source);
 
     uv_timer_t timer;
     assert(! uv_timer_init(loop, &timer));
-    assert(! uv_timer_start(&timer, on_timeout, 1000, 1000));
+    assert(! uv_timer_start(&timer, on_timeout, 10, 10));
 
+    /* listen on port 1234, try connect with "nc localhost 1234" */
     uv_tcp_t server;
     assert(! uv_tcp_init(loop, &server));
     assert(! uv_tcp_init(loop, &server));
@@ -116,10 +127,8 @@ int main()
 
     GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     g_signal_connect(win, "destroy", gtk_main_quit, NULL);
-
     label = gtk_label_new("0");
     gtk_container_add(GTK_CONTAINER(win), label);
-
     gtk_widget_show_all(win);
 
     gtk_main();
