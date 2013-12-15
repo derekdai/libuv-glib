@@ -69,6 +69,21 @@ GSource * uv_source_new(uv_loop_t *loop)
     return self;
 }
 
+guint uv_source_add(uv_loop_t *loop)
+{
+    g_return_val_if_fail(NULL != loop, 0);
+
+    GSource *self = uv_source_new(loop);
+    if(! self) {
+        return 0;
+    }
+
+    guint tag = g_source_attach(self, NULL);
+    g_source_unref(self);
+
+    return tag;
+}
+
 GtkWidget *label = NULL;
 
 int count = 0;
@@ -103,18 +118,25 @@ void on_connect(uv_stream_t *server, int status)
     uv_close((uv_handle_t *) conn, on_close);
 }
 
+void on_signal(uv_signal_t *sig, int signum)
+{
+    gtk_main_quit();
+}
+
 int main(int argc, char *args[])
 {
     gtk_init(&argc, &args);
 
     uv_loop_t *loop = uv_default_loop();
-    GSource *source = uv_source_new(loop);
-    g_source_attach(source, NULL);
-    g_source_unref(source);
+    guint tag = uv_source_add(loop);
 
     uv_timer_t timer;
     assert(! uv_timer_init(loop, &timer));
     assert(! uv_timer_start(&timer, on_timeout, 10, 10));
+
+    uv_signal_t sig;
+    assert(! uv_signal_init(loop, &sig));
+    assert(! uv_signal_start(&sig, on_signal, SIGINT));
 
     /* listen on port 1234, try connect with "nc localhost 1234" */
     uv_tcp_t server;
@@ -132,6 +154,14 @@ int main(int argc, char *args[])
     gtk_widget_show_all(win);
 
     gtk_main();
+
+    uv_close((uv_handle_t *) &server, NULL);
+    uv_close((uv_handle_t *) &sig, NULL);
+    uv_close((uv_handle_t *) &timer, NULL);
+    g_source_remove(tag);
+
+    /* TODO if terminate with ctrl+c, uv_loop_delete() blocks */
+    /*uv_loop_delete(loop);*/
 
     return 0;
 }
